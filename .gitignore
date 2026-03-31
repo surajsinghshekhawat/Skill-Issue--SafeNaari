@@ -68,3 +68,9 @@ firebase.config.ts
 # Exclude research and scripts from repo
 research/
 scripts/
+
+# Local papers / templates (do not commit)
+ref_paper/
+*.pdf
+*.doc
+*.docx
