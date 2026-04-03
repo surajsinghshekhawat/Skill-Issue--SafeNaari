@@ -49,11 +49,18 @@ router.post("/admin-login", authWriteLimiter, async (req: Request, res: Response
       });
     }
 
+    const adminSecret = process.env.ADMIN_PASSWORD || process.env.ADMIN_SECRET;
+    if (!adminSecret) {
+      return res.status(503).json({
+        error: "Admin login is not configured. Set ADMIN_PASSWORD or ADMIN_SECRET in the API .env.",
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     const adminEmail = process.env.ADMIN_EMAIL || "admin@womensafety.local";
-    const adminPassword = process.env.ADMIN_PASSWORD || process.env.ADMIN_SECRET || "admin";
     const ok =
-      (loginId === adminEmail && password === adminPassword) ||
-      (loginId === "admin" && password === (process.env.ADMIN_SECRET || adminPassword));
+      (loginId === adminEmail && password === adminSecret) ||
+      (loginId === "admin" && password === adminSecret);
 
     if (!ok) {
       return res.status(401).json({

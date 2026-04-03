@@ -20,9 +20,6 @@
         "NSLocationAlwaysUsageDescription": "This app needs location access to track your location during emergencies.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Background location lets SafeNaari update risk checks when the app is not open.",
         "UIBackgroundModes": ["location"]
-      },
-      "config": {
-        "googleMapsApiKey": "AIzaSyB7r6HWm2mdwsjXNnbtjEUrIUN45CfcqfQ"
       }
     },
     "android": {
@@ -43,12 +40,7 @@
         "CAMERA",
         "READ_EXTERNAL_STORAGE",
         "WRITE_EXTERNAL_STORAGE"
-      ],
-      "config": {
-        "googleMaps": {
-          "apiKey": "AIzaSyB7r6HWm2mdwsjXNnbtjEUrIUN45CfcqfQ"
-        }
-      }
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"

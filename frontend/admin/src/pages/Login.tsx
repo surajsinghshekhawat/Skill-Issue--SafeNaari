@@ -57,7 +57,8 @@ export default function Login() {
           </button>
         </form>
         <p className={styles.hint}>
-          Default: admin / admin (set ADMIN_EMAIL, ADMIN_PASSWORD or ADMIN_SECRET on server)
+          Use the password from the API server’s <code>ADMIN_PASSWORD</code> or{' '}
+          <code>ADMIN_SECRET</code> (and <code>ADMIN_EMAIL</code> if you log in with email). No default is set in code.
         </p>
       </div>
     </div>

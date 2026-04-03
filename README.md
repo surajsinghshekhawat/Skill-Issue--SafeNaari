@@ -37,7 +37,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```bash
 cd backend/api
 cp .env.example .env
-# Edit .env: GOOGLE_MAPS_API_KEY, ML_SERVICE_URL, optional DATABASE_URL / Twilio
+# Edit .env: GOOGLE_MAPS_API_KEY, ADMIN_PASSWORD, ML_SERVICE_URL, optional DATABASE_URL / Twilio
 npm install
 npm run dev
 ```
@@ -61,6 +61,8 @@ npm run dev
 
 ```bash
 cd frontend/mobile
+cp .env.example .env
+# Set GOOGLE_MAPS_NATIVE_API_KEY (Maps SDK for Android/iOS — restrict by package + SHA-1 in Google Cloud)
 npm install
 ```
 
@@ -70,15 +72,22 @@ In `src/services/api.ts`, set **`API_BASE_URL`** in the `__DEV__` branch to your
 npx expo start
 ```
 
-**Map tiles (Google):** enable **Maps SDK for Android / iOS** and use an app-restricted key in `app.json` (`android.config.googleMaps`, `ios.config.googleMapsApiKey`). Backend Places/Routes/Geocode use a **separate** server-friendly key in `.env`.
+**Map tiles (Google):** Keys are **not** stored in `app.json`. `app.config.js` reads **`GOOGLE_MAPS_NATIVE_API_KEY`** from `frontend/mobile/.env` (local) or **EAS Secrets** (cloud builds). Enable **Maps SDK for Android / iOS** for that key. Backend Places/Routes/Geocode use **`GOOGLE_MAPS_API_KEY`** in `backend/api/.env` (can be a different key restricted for server use).
 
-**Dev client / native modules:** use `expo run:android` or an EAS development build after changing native config.
+**Dev client / native modules:** use `expo run:android` / EAS after changing native config.
+
+### Security (secrets)
+
+- **Never commit** `.env` files or paste API keys into tracked JSON/TS.
+- If keys ever appeared in Git history, **rotate them in Google Cloud / Twilio / JWT** immediately; scanners keep old commits. To scrub history use [git-filter-repo](https://github.com/newren/git-filter-repo) or make a **new repo** with a squashed clean tree.
+- **Admin login** requires **`ADMIN_PASSWORD`** or **`ADMIN_SECRET`** in the API `.env` (there is no default password in code).
 
 ## Environment variables (API)
 
 See `backend/api/.env.example`. Important:
 
 - **`GOOGLE_MAPS_API_KEY`** — server calls (Places, Geocoding, Routes, Directions fallback).
+- **`ADMIN_PASSWORD`** or **`ADMIN_SECRET`** — required for admin dashboard login.
 - **`ML_SERVICE_URL`** — e.g. `http://localhost:8000` or `http://<LAN-IP>:8000`.
 - **`MOBILE_AUTH_REQUIRED`** — when `true`, mobile must send `Authorization: Bearer <token>` from login/register.
 - **`DATABASE_URL`** — optional Postgres; URL-encode special characters in passwords (`@` → `%40`).
