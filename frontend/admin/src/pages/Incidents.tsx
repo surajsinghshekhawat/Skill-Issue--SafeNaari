@@ -45,6 +45,30 @@ export default function Incidents() {
     }
   }
 
+  const exportCsv = () => {
+    const headers = ['id', 'type', 'severity', 'category', 'lat', 'lng', 'timestamp', 'verified', 'user_id']
+    const rows = incidents.map((i) => [
+      i.id,
+      i.type,
+      String(i.severity ?? ''),
+      String(i.category ?? ''),
+      String(i.location?.lat ?? ''),
+      String(i.location?.lng ?? ''),
+      i.timestamp,
+      i.verified ? 'true' : 'false',
+      String(i.user_id ?? ''),
+    ])
+    const esc = (v: string) => `"${String(v).replace(/"/g, '""')}"`
+    const csv = [headers.join(','), ...rows.map((r) => r.map(esc).join(','))].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `incidents-${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   const handleReject = async (id: string, reason?: string) => {
     setActioning(id)
     try {
@@ -81,6 +105,9 @@ export default function Incidents() {
           </select>
         </label>
         <button type="button" onClick={load} className={styles.refresh}>Refresh</button>
+        <button type="button" onClick={exportCsv} className={styles.refresh} disabled={!incidents.length}>
+          Export CSV
+        </button>
       </div>
 
       {error && <p className={styles.error}>{error}</p>}

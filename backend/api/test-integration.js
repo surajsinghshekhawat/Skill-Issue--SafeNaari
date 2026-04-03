@@ -5,8 +5,8 @@
 
 const axios = require('axios');
 
-const ML_SERVICE_URL = 'http://192.168.1.12:8000';
-const BACKEND_URL = 'http://192.168.1.12:3001';
+const ML_SERVICE_URL = 'http://192.168.1.7:8000';
+const BACKEND_URL = 'http://192.168.1.7:3001';
 
 // Test colors for terminal
 const colors = {

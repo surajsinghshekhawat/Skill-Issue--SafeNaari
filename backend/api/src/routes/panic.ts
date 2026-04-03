@@ -11,6 +11,23 @@
 import express from "express";
 import { Request, Response } from "express";
 import { processIncident } from "../services/mlService";
+import { sendSms } from "../services/notificationService";
+import { mobileAuthRequired, requireUserAuth } from "../middleware/userAuth";
+import { dbReady } from "../db/pool";
+import {
+  cancelPanicRecord,
+  createPanicRecord,
+  getActivePanicForUser,
+} from "../db/panicDb";
+import rateLimit from "express-rate-limit";
+
+const panicTriggerLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many panic requests, try again shortly." },
+});
 
 const router = express.Router();
 
@@ -18,49 +35,94 @@ const router = express.Router();
  * POST /api/panic/trigger
  * Trigger emergency panic alert
  */
-router.post("/trigger", async (req: Request, res: Response) => {
+router.post(
+  "/trigger",
+  panicTriggerLimiter,
+  (req, res, next) => (mobileAuthRequired() ? requireUserAuth(req, res, next) : next()),
+  async (req: Request, res: Response) => {
   try {
     const { userId, location, emergencyContacts, panicType, timezone_offset_minutes } =
       req.body;
 
+    const authedUserId = (req as any).user?.sub;
+    const effectiveUserId = mobileAuthRequired() ? authedUserId : userId;
+
     // Validate required fields
-    if (!userId || !location || !emergencyContacts) {
+    if (!effectiveUserId || !location || !emergencyContacts) {
       return res.status(400).json({
-        error: "Missing required fields: userId, location, emergencyContacts",
+        error: "Missing required fields: userId (or auth), location, emergencyContacts",
       });
     }
 
     console.log("🚨 PANIC ALERT RECEIVED:", {
-      userId,
+      userId: effectiveUserId,
       location,
       panicType: panicType || "manual",
       timestamp: new Date().toISOString(),
     });
 
-    // TODO: Implement actual panic response logic:
-    // 1. Verify user authentication
-    // 2. Store panic incident in database
-    // 3. Send notifications to emergency contacts
-    // 4. Notify local authorities
-    // 5. Start continuous location tracking
-    // 6. Log incident for admin dashboard
-
-    const panicId = `panic_${Date.now()}`;
+    const panicId = `panic_${Date.now()}_${effectiveUserId}`;
     const incidentTimestamp = new Date().toISOString();
+
+    // Send SMS notifications to emergency contacts (best-effort)
+    const lat = location.latitude || location.lat;
+    const lng = location.longitude || location.lng;
+    const mapsUrl =
+      lat != null && lng != null
+        ? `https://www.google.com/maps?q=${encodeURIComponent(lat)},${encodeURIComponent(lng)}`
+        : null;
+
+    const smsBody =
+      `SafeNaari SOS: ${String(effectiveUserId)} triggered an emergency alert.` +
+      (mapsUrl ? ` Location: ${mapsUrl}` : "");
+
+    const contacts: string[] = Array.isArray(emergencyContacts)
+      ? emergencyContacts.map((x: any) => String(x))
+      : [];
+
+    const smsResults = await Promise.all(
+      contacts.map((to) => sendSms(to, smsBody))
+    );
+
+    const smsSent = smsResults.filter((r) => r.status === "sent").length;
+    const smsSkipped = smsResults.filter((r) => r.status === "skipped").length;
+    const smsFailed = smsResults.filter((r) => r.status === "failed").length;
+
+    if (smsFailed > 0) {
+      console.warn("📨 [SMS] Some messages failed", {
+        failed: smsResults
+          .filter((r) => r.status === "failed")
+          .map((r) => ({ to: r.to, errorCode: (r as any).errorCode, error: r.error })),
+      });
+    }
+
+    if (await dbReady()) {
+      await createPanicRecord({
+        id: panicId,
+        userId: effectiveUserId,
+        latitude: lat != null ? Number(lat) : null,
+        longitude: lng != null ? Number(lng) : null,
+        meta: {
+          contactsRequested: contacts.length,
+          smsSent,
+          smsFailed,
+        },
+      });
+    }
 
     // Process incident through ML service
     let mlResponse = null;
     try {
       const incidentData: any = {
         id: panicId,
-        latitude: location.latitude || location.lat,
-        longitude: location.longitude || location.lng,
+        latitude: lat,
+        longitude: lng,
         timestamp: incidentTimestamp,
         type: "panic_alert",
         severity: 5, // Panic alerts are always high severity
         category: "emergency",
         verified: true,
-        user_id: userId,
+        user_id: effectiveUserId,
       };
 
       // With exactOptionalPropertyTypes, omit optional fields instead of setting `undefined`.
@@ -80,9 +142,16 @@ router.post("/trigger", async (req: Request, res: Response) => {
       message: "Emergency alert triggered successfully",
       timestamp: incidentTimestamp,
       actions: {
-        contactsNotified: emergencyContacts.length,
-        authoritiesAlerted: true,
+        contactsRequested: contacts.length,
+        contactsSmsSent: smsSent,
+        contactsSmsSkipped: smsSkipped,
+        contactsSmsFailed: smsFailed,
+        authoritiesAlerted: false,
         locationTrackingStarted: true,
+      },
+      notifications: {
+        provider: process.env.TWILIO_ACCOUNT_SID ? "twilio" : "unconfigured",
+        sms: smsResults,
       },
       mlProcessing: mlResponse
         ? {
@@ -104,31 +173,41 @@ router.post("/trigger", async (req: Request, res: Response) => {
  * POST /api/panic/cancel
  * Cancel active panic alert
  */
-router.post("/cancel", async (req: Request, res: Response) => {
-  try {
-    const { userId, panicId } = req.body;
+router.post(
+  "/cancel",
+  (req, res, next) => (mobileAuthRequired() ? requireUserAuth(req, res, next) : next()),
+  async (req: Request, res: Response) => {
+    try {
+      const panicId = String(req.body?.panicId || "");
+      const authedUserId = (req as any).user?.sub;
+      const effectiveUserId = mobileAuthRequired()
+        ? authedUserId
+        : String(req.body?.userId || "");
 
-    if (!userId || !panicId) {
-      return res.status(400).json({
-        error: "Missing required fields: userId, panicId",
+      if (!panicId || !effectiveUserId) {
+        return res.status(400).json({
+          error: "Missing required fields: panicId (and userId when auth is off)",
+        });
+      }
+
+      let cancelled = true;
+      if (await dbReady()) {
+        cancelled = await cancelPanicRecord(panicId, effectiveUserId);
+      }
+
+      console.log("✅ PANIC CANCEL REQUEST:", {
+        userId: effectiveUserId,
+        panicId,
+        cancelled,
+        timestamp: new Date().toISOString(),
       });
-    }
-
-    console.log("✅ PANIC ALERT CANCELLED:", {
-      userId,
-      panicId,
-      timestamp: new Date().toISOString(),
-    });
-
-    // TODO: Implement panic cancellation logic:
-    // 1. Verify user owns the panic alert
-    // 2. Update panic status in database
-    // 3. Stop location tracking
-    // 4. Send cancellation notifications
 
     return res.status(200).json({
       success: true,
-      message: "Panic alert cancelled successfully",
+      cancelled,
+      message: cancelled
+        ? "Panic alert cancelled successfully"
+        : "No active panic matched (may already be cleared)",
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -146,13 +225,21 @@ router.post("/cancel", async (req: Request, res: Response) => {
  */
 router.get("/status/:userId", async (req: Request, res: Response) => {
   try {
-    const { userId } = req.params;
+    const userId = String(req.params.userId || "");
 
-    // TODO: Query database for active panic alerts
-    // For now, return mock data
+    let active: Awaited<ReturnType<typeof getActivePanicForUser>> = null;
+    if (await dbReady()) {
+      active = await getActivePanicForUser(userId);
+    }
+
     res.status(200).json({
-      hasActivePanic: false,
-      lastPanicTime: null,
+      hasActivePanic: !!active,
+      panicId: active?.panicId ?? null,
+      lastPanicTime: active?.startedAt ?? null,
+      location:
+        active?.latitude != null && active?.longitude != null
+          ? { lat: active.latitude, lng: active.longitude }
+          : null,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {

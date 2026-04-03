@@ -1,6 +1,7 @@
 """
-In-memory data storage for incidents
-TODO: Replace with database integration
+In-memory data storage for incidents (dev / ML service local state).
+Production option: sync incidents to Postgres via the Node API or replace this module
+with DB-backed storage when you need multi-instance ML workers.
 """
 
 from typing import List, Dict, Optional

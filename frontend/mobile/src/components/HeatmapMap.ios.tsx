@@ -397,13 +397,6 @@ const HeatmapMap: React.FC<HeatmapMapProps> = ({
         onRegionChangeComplete={(region) => {
           applyRegionToQuery(region);
         }}
-        onError={(error: any) => {
-          console.error('Map error:', error);
-          setMapError(true);
-          if (onError) {
-            onError();
-          }
-        }}
       >
         {/* Show user location marker if we have it */}
         {userLocation && (
@@ -431,7 +424,6 @@ const HeatmapMap: React.FC<HeatmapMapProps> = ({
                 fillColor={color}
                 strokeColor={color}
                 strokeWidth={0}
-                opacity={opacity}
               />
             );
           })}
@@ -452,7 +444,7 @@ const HeatmapMap: React.FC<HeatmapMapProps> = ({
           <Text style={styles.errorText}>{error}</Text>
           <TouchableOpacity
             style={styles.retryButton}
-            onPress={loadHeatmap}
+            onPress={() => loadHeatmap()}
           >
             <Text style={styles.retryButtonText}>Retry</Text>
           </TouchableOpacity>

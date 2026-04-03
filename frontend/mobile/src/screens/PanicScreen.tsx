@@ -3,7 +3,7 @@
  * Emergency SOS and emergency contacts. Logic unchanged.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   StyleSheet,
@@ -22,7 +22,7 @@ import PanicButton from '../components/PanicButton';
 import { colors } from '../theme/colors';
 import { spacing } from '../theme/spacing';
 import { ShieldIcon, AlertIcon, CallIcon, TrashIcon, CloseIcon } from '../components/AppIcons';
-import { triggerPanicAlert, updateLocation } from '../services/api';
+import { getStoredUserId, triggerPanicAlert, updateLocation, cancelPanicAlert } from '../services/api';
 import * as Location from 'expo-location';
 
 const EMERGENCY_CONTACTS_KEY = '@emergency_contacts';
@@ -35,6 +35,7 @@ interface EmergencyContact {
 }
 
 export default function PanicScreen() {
+  const lastPanicIdRef = useRef<string | null>(null);
   const [isActive, setIsActive] = useState(false);
   const [emergencyContacts, setEmergencyContacts] = useState<string[]>([]);
   const [contactsList, setContactsList] = useState<EmergencyContact[]>([]);
@@ -102,22 +103,34 @@ export default function PanicScreen() {
 
   const handlePanicTrigger = async () => {
     try {
+      if (!emergencyContacts || emergencyContacts.length === 0) {
+        Alert.alert('Add a contact first', 'Please add at least 1 emergency contact before using SOS.');
+        return;
+      }
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
         Alert.alert('Permission Denied', 'Location permission is required for emergency alerts.');
         return;
       }
+      const storedUserId = (await getStoredUserId()) || 'user_anon';
       const location = await Location.getCurrentPositionAsync({});
       const { latitude, longitude } = location.coords;
-      await triggerPanicAlert('user123', latitude, longitude, emergencyContacts);
+      const resp = await triggerPanicAlert(storedUserId, latitude, longitude, emergencyContacts);
+      if (resp?.panicId) lastPanicIdRef.current = String(resp.panicId);
       setIsActive(true);
       startLocationTracking(latitude, longitude);
-      Alert.alert('Emergency Alert Sent', 'Your location has been shared with emergency contacts.', [
+      const sent = resp?.actions?.contactsSmsSent ?? 0;
+      const skipped = resp?.actions?.contactsSmsSkipped ?? 0;
+      const failed = resp?.actions?.contactsSmsFailed ?? 0;
+      Alert.alert('Emergency Alert', `SMS: sent ${sent}, skipped ${skipped}, failed ${failed}`, [
         { text: 'Cancel Alert', style: 'destructive', onPress: handleCancelPanic },
         { text: 'OK', style: 'default' },
       ]);
     } catch (error) {
-      Alert.alert('Error', 'Failed to send emergency alert. Please try again.');
+      Alert.alert(
+        'Error',
+        (error as any)?.message || 'Failed to send emergency alert. Please try again.'
+      );
     }
   };
 
@@ -125,8 +138,9 @@ export default function PanicScreen() {
     const interval = setInterval(async () => {
       if (!isActive) { clearInterval(interval); return; }
       try {
+        const storedUserId = (await getStoredUserId()) || 'user_anon';
         const loc = await Location.getCurrentPositionAsync({});
-        await updateLocation('user123', loc.coords.latitude, loc.coords.longitude);
+        await updateLocation(storedUserId, loc.coords.latitude, loc.coords.longitude);
       } catch (_e) {}
     }, 30000);
     return () => clearInterval(interval);
@@ -135,7 +149,24 @@ export default function PanicScreen() {
   const handleCancelPanic = () => {
     Alert.alert('Cancel Emergency Alert', 'Are you sure you want to cancel?', [
       { text: 'No, Keep Active', style: 'cancel' },
-      { text: 'Yes, Cancel', style: 'destructive', onPress: () => { setIsActive(false); setCountdown(null); } },
+      {
+        text: 'Yes, Cancel',
+        style: 'destructive',
+        onPress: async () => {
+          setIsActive(false);
+          setCountdown(null);
+          const pid = lastPanicIdRef.current;
+          const uid = (await getStoredUserId()) || undefined;
+          if (pid) {
+            try {
+              await cancelPanicAlert(pid, uid);
+            } catch {
+              // API may be offline; local state still cleared
+            }
+            lastPanicIdRef.current = null;
+          }
+        },
+      },
     ]);
   };
 

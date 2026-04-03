@@ -31,7 +31,7 @@ try {
   console.warn("expo-image-picker not available - image upload disabled");
 }
 
-import { API_BASE_URL } from "../services/api"; // Import API_BASE_URL
+import { submitCommunityReport } from "../services/api";
 
 interface ReportForm {
   type: "community_report";
@@ -208,42 +208,17 @@ export default function ReportsScreen() {
     setIsSubmitting(true);
 
     try {
-      console.log(
-        "📝 Submitting report to:",
-        `${API_BASE_URL}/api/reports/submit`
-      );
-      // Submit report to backend
-      const response = await fetch(`${API_BASE_URL}/api/reports/submit`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      const result = await submitCommunityReport({
+        type: form.type,
+        category: form.category,
+        description: form.description,
+        severity: form.severity,
+        location: {
+          latitude: form.location!.latitude,
+          longitude: form.location!.longitude,
         },
-        body: JSON.stringify({
-          userId: "user123", // TODO: Get from auth
-          type: form.type,
-          category: form.category,
-          description: form.description,
-          severity: form.severity,
-          location: {
-            latitude: form.location!.latitude,
-            longitude: form.location!.longitude,
-          },
-          timestamp: new Date().toISOString(),
-          // Minutes east of UTC (e.g., IST => +330). Used to compute incident local hour-of-day.
-          timezone_offset_minutes: -new Date().getTimezoneOffset(),
-        }),
+        media: form.media,
       });
-
-      console.log("📡 Response status:", response.status);
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(
-          errorData.error || `HTTP ${response.status}: Submission failed`
-        );
-      }
-
-      const result = await response.json();
       console.log("✅ Report submission result:", result);
 
       if (result.success) {

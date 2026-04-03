@@ -15,7 +15,8 @@ def get_model_status() -> Dict:
         Dictionary with model status information
     """
     return {
-        "loaded": True,  # TODO: Check if models are actually loaded
+        # Stub: wire to real artifact checks (e.g. sklearn/joblib files on disk) when training is enabled.
+        "loaded": True,
         "last_training": datetime.utcnow().isoformat() + "Z",
     }
 
@@ -32,8 +33,7 @@ async def train_models(force: bool = False) -> Dict:
     """
     incident_count = get_incident_count()
     
-    # TODO: Implement actual model training
-    # For now, just return status
+    # Stub: replace with sklearn/pipeline fit + persistence when production training is required.
     
     return {
         "started": True,

@@ -7,13 +7,37 @@
  * @version 1.0.0
  */
 
-import axios, { AxiosInstance } from "axios";
+import axios from "axios";
 
-const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
+/** Read at call time so `.env` is loaded first (see `src/env.ts`). */
+function googleMapsApiKey(): string {
+  return (process.env.GOOGLE_MAPS_API_KEY || "").trim();
+}
+
+function logMapsKeyHint(context: string): void {
+  const key = googleMapsApiKey();
+  const ok = key.length > 0;
+  console.warn(
+    `[Google Maps] ${context} — key ${ok ? `set (${key.length} chars)` : "MISSING or empty"}`
+  );
+  if (!ok) {
+    console.warn("[Google Maps] Add GOOGLE_MAPS_API_KEY to backend/api/.env (no quotes) and restart the API.");
+  }
+}
+
+function logRequestDeniedHints(errorMessage?: string): void {
+  console.warn("[Google Maps] REQUEST_DENIED — Google rejected this key for this request.");
+  if (errorMessage) console.warn("[Google Maps] Detail:", errorMessage);
+  console.warn(
+    "[Google Maps] Fix checklist (same GCP project as the key): (1) APIs & Services → Enable “Places API” and “Geocoding API”. (2) Billing enabled on that project. (3) Credentials → your key → Application restrictions: use “None” for dev, or “IP addresses” with this machine’s public IP — not Android/iOS only (this server calls Google from Node, not the phone app). (4) API restrictions: “Don’t restrict” or include Places + Geocoding + Routes."
+  );
+}
 // Routes API (new) - legacy Directions API is deprecated
 const GOOGLE_MAPS_ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes";
 const GOOGLE_MAPS_PLACES_URL = "https://maps.googleapis.com/maps/api/place/autocomplete/json";
 const GOOGLE_MAPS_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json";
+// Legacy Directions API fallback (returns more alternative routes in practice, even though deprecated).
+const GOOGLE_MAPS_DIRECTIONS_URL = "https://maps.googleapis.com/maps/api/directions/json";
 
 /**
  * Decode Google Maps encoded polyline
@@ -83,6 +107,19 @@ export async function getRouteOptions(
   alternatives: boolean = true
 ): Promise<RouteOption[]> {
   try {
+    if (!googleMapsApiKey()) {
+      logMapsKeyHint("getRouteOptions");
+      return [
+        {
+          id: "route_direct",
+          waypoints: [
+            { lat: startLat, lng: startLng },
+            { lat: endLat, lng: endLng },
+          ],
+        },
+      ];
+    }
+
     console.log("🗺️ Requesting route from Google Routes API:", {
       origin: `${startLat},${startLng}`,
       destination: `${endLat},${endLng}`,
@@ -110,7 +147,7 @@ export async function getRouteOptions(
       {
         headers: {
           "Content-Type": "application/json",
-          "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+          "X-Goog-Api-Key": googleMapsApiKey(),
           "X-Goog-FieldMask":
             "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs,routes.localizedValues,routes.legs.steps.navigationInstruction,routes.legs.steps.distanceMeters",
         },
@@ -193,6 +230,19 @@ export async function getRouteOptions(
       );
     }
 
+    // Google Routes API does not guarantee alternatives even when requested.
+    // If only 1 route is returned, try legacy Directions API with alternatives=true to surface more options.
+    if (alternatives && routes.length < 2) {
+      const legacy = await getLegacyDirectionsAlternatives(startLat, startLng, endLat, endLng).catch(() => []);
+      if (legacy.length > 0) {
+        const seen = new Set<string>(routes.map((r) => r.id));
+        for (const r of legacy) {
+          if (!seen.has(r.id)) routes.push(r);
+        }
+        console.log(`🧭 Directions API fallback added ${legacy.length} route(s); total now ${routes.length}`);
+      }
+    }
+
     return routes;
   } catch (error: any) {
     console.error("Google Routes API request failed:", error.message);
@@ -212,14 +262,86 @@ export async function getRouteOptions(
   }
 }
 
+async function getLegacyDirectionsAlternatives(
+  startLat: number,
+  startLng: number,
+  endLat: number,
+  endLng: number
+): Promise<RouteOption[]> {
+  const key = googleMapsApiKey();
+  if (!key) return [];
+
+  console.log("🧭 Fallback: requesting alternatives from legacy Directions API");
+  const response = await axios.get(GOOGLE_MAPS_DIRECTIONS_URL, {
+    params: {
+      origin: `${startLat},${startLng}`,
+      destination: `${endLat},${endLng}`,
+      alternatives: "true",
+      mode: "driving",
+      key,
+    },
+    timeout: 15000,
+  });
+
+  const status = response?.data?.status;
+  const routes = Array.isArray(response?.data?.routes) ? response.data.routes : [];
+  if (status !== "OK" || routes.length === 0) {
+    console.warn("🧭 Directions API returned no routes:", status, response?.data?.error_message);
+    return [];
+  }
+
+  const out: RouteOption[] = [];
+  for (let i = 0; i < routes.length; i++) {
+    const r = routes[i];
+    const encoded = r?.overview_polyline?.points;
+    const waypoints = encoded ? decodePolyline(String(encoded)) : [{ lat: startLat, lng: startLng }, { lat: endLat, lng: endLng }];
+
+    // Directions duration is in seconds inside legs[].duration.value
+    let durationSeconds: number | undefined;
+    let distanceMeters: number | undefined;
+    const legs = Array.isArray(r?.legs) ? r.legs : [];
+    if (legs[0]?.duration?.value) durationSeconds = Number(legs[0].duration.value);
+    if (legs[0]?.distance?.value) distanceMeters = Number(legs[0].distance.value);
+
+    // Lightweight instructions: strip HTML from steps.
+    const instructions: RouteInstruction[] = [];
+    const steps = Array.isArray(legs[0]?.steps) ? legs[0].steps : [];
+    for (const s of steps) {
+      const html = s?.html_instructions ? String(s.html_instructions) : "";
+      const text = html ? html.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim() : "";
+      if (!text) continue;
+      const ri: RouteInstruction = { instruction: text };
+      if (s?.distance?.value) ri.distanceMeters = Number(s.distance.value);
+      instructions.push(ri);
+    }
+
+    const opt: RouteOption = {
+      id: `route_directions_${i === 0 ? "primary" : `alternative_${i}`}`,
+      waypoints,
+      summary: r?.summary ? String(r.summary) : `Directions route ${i + 1}`,
+    };
+    if (typeof distanceMeters === "number" && Number.isFinite(distanceMeters)) opt.distance = distanceMeters;
+    if (typeof durationSeconds === "number" && Number.isFinite(durationSeconds)) opt.duration = durationSeconds;
+    if (instructions.length) opt.instructions = instructions;
+    out.push(opt);
+  }
+
+  return out;
+}
+
 /**
  * Search for places using Google Places Autocomplete
  */
 export async function searchPlaces(query: string, location?: { lat: number; lng: number }): Promise<Array<{ placeId: string; description: string; lat?: number; lng?: number }>> {
   try {
+    if (!googleMapsApiKey()) {
+      logMapsKeyHint("searchPlaces");
+      return [];
+    }
+
     const params: any = {
       input: query,
-      key: GOOGLE_MAPS_API_KEY,
+      key: googleMapsApiKey(),
       // Remove types restriction to get all results like Google Maps app
       // This will return establishments, addresses, and points of interest
     };
@@ -240,14 +362,9 @@ export async function searchPlaces(query: string, location?: { lat: number; lng:
 
     if (response.data.status !== "OK" && response.data.status !== "ZERO_RESULTS") {
       console.error("Google Places API error:", response.data.status, response.data.error_message);
-      // REQUEST_DENIED usually means Places API not enabled for this key
       if (response.data.status === "REQUEST_DENIED") {
-        console.warn("⚠️ Google Places API not enabled.");
-        console.warn("⚠️ To enable: Go to Google Cloud Console > APIs & Services > Enable 'Places API'");
-        console.warn("⚠️ URL: https://console.cloud.google.com/apis/library/places-backend.googleapis.com");
-        if (response.data.error_message) {
-          console.warn("⚠️ Error details:", response.data.error_message);
-        }
+        logMapsKeyHint("after REQUEST_DENIED");
+        logRequestDeniedHints(response.data.error_message);
       }
       return [];
     }
@@ -273,10 +390,15 @@ export async function searchPlaces(query: string, location?: { lat: number; lng:
  */
 export async function getPlaceCoordinates(placeId: string): Promise<{ lat: number; lng: number } | null> {
   try {
+    if (!googleMapsApiKey()) {
+      logMapsKeyHint("getPlaceCoordinates");
+      return null;
+    }
+
     const response = await axios.get(GOOGLE_MAPS_GEOCODE_URL, {
       params: {
         place_id: placeId,
-        key: GOOGLE_MAPS_API_KEY,
+        key: googleMapsApiKey(),
       },
       timeout: 5000,
     });

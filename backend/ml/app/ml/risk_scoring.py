@@ -120,6 +120,26 @@ def _incident_hour_local(incident: Dict[str, Any]) -> Optional[int]:
     return int(ts_dt.hour)
 
 
+def _verification_weight(incident: Dict[str, Any]) -> float:
+    """
+    Moderation-aware weighting.
+
+    Policy:
+    - verified == True           => full weight (1.0)
+    - verified == False + moderation_reason set => rejected => zero weight (0.0)
+    - verified == False + no moderation_reason  => pending => reduced weight
+    """
+    try:
+        if bool(incident.get("verified", False)) is True:
+            return 1.0
+        # If the incident was explicitly rejected, moderation_reason is typically set.
+        if incident.get("moderation_reason", None) not in (None, "", False):
+            return 0.0
+        return 0.35
+    except Exception:
+        return 0.35
+
+
 def _calculate_risk_score_from_incidents(
     lat: float,
     lng: float,
@@ -186,7 +206,47 @@ def _calculate_risk_score_from_incidents(
             },
         }
 
-    for incident in nearby_incidents:
+    # Apply moderation filtering/weighting:
+    # - Rejected incidents contribute 0.0 (ignored)
+    # - Pending incidents contribute reduced weight
+    active_incidents: List[Dict[str, Any]] = []
+    for inc in nearby_incidents:
+        vw = _verification_weight(inc)
+        if vw <= 0.0:
+            continue
+        active_incidents.append(inc)
+
+    if not active_incidents:
+        # All nearby incidents were rejected => treat as no-incidents for scoring.
+        base_risk = current_time_factor * 1.5
+        return {
+            "risk_score": round(base_risk, 2),
+            "risk_level": "safe" if base_risk < 2.0 else "medium",
+            "factors": {
+                "incident_density": 0.0,
+                "recency": 0.0,
+                "severity": 0.0,
+                "time_pattern": round(current_time_factor, 3),
+                "current_time_factor": round(current_time_factor, 3),
+                "raw_incident_count": 0,
+                "effective_incident_count": 0.0,
+                "verified_incident_count": 0,
+                "pending_incident_count": 0,
+                "rejected_incident_count": len(nearby_incidents),
+            },
+        }
+
+    verified_count = 0
+    pending_count = 0
+    rejected_count = len(nearby_incidents) - len(active_incidents)
+
+    for incident in active_incidents:
+        vw = _verification_weight(incident)
+        if vw >= 0.999:
+            verified_count += 1
+        else:
+            pending_count += 1
+
         distance_meters = calculate_distance_haversine(
             lat, lng, incident["latitude"], incident["longitude"]
         )
@@ -214,12 +274,13 @@ def _calculate_risk_score_from_incidents(
             inc_hour_local = query_local_hour
         time_weight = _time_of_day_similarity_weight(query_local_hour, inc_hour_local)
 
-        weight = distance_weight * recency_weight * time_weight
-        effective_incident_count += recency_weight * time_weight
+        # Moderation-aware multiplier
+        weight = distance_weight * recency_weight * time_weight * vw
+        effective_incident_count += recency_weight * time_weight * vw
 
         weighted_severity += incident["severity"] * weight
-        weighted_recency_numer += recency_weight * distance_weight * time_weight
-        weighted_recency_denom += distance_weight * time_weight
+        weighted_recency_numer += recency_weight * distance_weight * time_weight * vw
+        weighted_recency_denom += distance_weight * time_weight * vw
         total_weight += weight
 
     # Density (recency-aware effective count) with calibrated max
@@ -248,7 +309,7 @@ def _calculate_risk_score_from_incidents(
     afternoon_incidents = 0
     morning_incidents = 0
 
-    for incident in nearby_incidents:
+    for incident in active_incidents:
         incident_hour = _incident_hour_local(incident)
         if incident_hour is None:
             continue
@@ -336,8 +397,11 @@ def _calculate_risk_score_from_incidents(
             "severity": round(avg_severity, 3),
             "time_pattern": round(time_pattern, 3),
             "current_time_factor": round(current_time_factor, 3),
-            "raw_incident_count": len(nearby_incidents),
+            "raw_incident_count": len(active_incidents),
             "effective_incident_count": round(effective_incident_count, 3),
+            "verified_incident_count": verified_count,
+            "pending_incident_count": pending_count,
+            "rejected_incident_count": rejected_count,
         },
         "calculated_at": now.isoformat(),
     }

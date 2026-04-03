@@ -17,6 +17,8 @@ import {
   getHeatmap,
   checkMLServiceHealth,
 } from "../services/mlService";
+import { dbReady } from "../db/pool";
+import { insertAuditEvent, listAuditEvents } from "../db/auditDb";
 
 const router = express.Router();
 
@@ -138,6 +140,16 @@ router.post(
       const reason = req.body?.reason;
       const result = await verifyIncident(incidentId, reason);
       if (result.success) {
+        if (await dbReady()) {
+          await insertAuditEvent({
+            actorId: String((req as any).admin?.sub || "admin"),
+            actorRole: "admin",
+            action: "incident_verify",
+            entityType: "incident",
+            entityId: incidentId,
+            reason: reason ? String(reason) : null,
+          });
+        }
         return res.status(200).json({
           success: true,
           message: "Incident verified",
@@ -177,6 +189,16 @@ router.post(
       const reason = req.body?.reason;
       const result = await rejectIncident(incidentId, reason);
       if (result.success) {
+        if (await dbReady()) {
+          await insertAuditEvent({
+            actorId: String((req as any).admin?.sub || "admin"),
+            actorRole: "admin",
+            action: "incident_reject",
+            entityType: "incident",
+            entityId: incidentId,
+            reason: reason ? String(reason) : null,
+          });
+        }
         return res.status(200).json({
           success: true,
           message: "Incident rejected",
@@ -396,6 +418,26 @@ router.get("/analytics", async (req: Request, res: Response) => {
  */
 router.get("/audit", async (req: Request, res: Response) => {
   try {
+    if (await dbReady()) {
+      const rows = await listAuditEvents(200);
+      if (rows.length > 0) {
+        return res.status(200).json({
+          success: true,
+          audit: rows.map((r) => ({
+            entityId: r.entityId,
+            action: r.action,
+            reason: r.reason,
+            timestamp: r.timestamp,
+            actorId: r.actorId,
+            actorRole: r.actorRole,
+            entityType: r.entityType,
+          })),
+          source: "database",
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+
     const result = await getIncidentsAll({ limit: 100, offset: 0 });
     const incidents = result.incidents || [];
     const audit = incidents
@@ -411,6 +453,7 @@ router.get("/audit", async (req: Request, res: Response) => {
     res.status(200).json({
       success: true,
       audit,
+      source: "incidents_fallback",
       timestamp: new Date().toISOString(),
     });
   } catch (error) {

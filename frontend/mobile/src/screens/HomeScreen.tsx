@@ -3,14 +3,18 @@
  * Main screen with safety heatmap. Map logic unchanged.
  */
 
-import React, { useState } from 'react';
-import { View, StyleSheet, Text, StatusBar, Platform, TouchableOpacity } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { View, StyleSheet, Text, StatusBar, Platform, TouchableOpacity, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRoute, RouteProp, useNavigation } from '@react-navigation/native';
 import { colors } from '../theme/colors';
 import { spacing } from '../theme/spacing';
 import { ShieldIcon, InfoIcon, LocationIcon, NavigateIcon } from '../components/AppIcons';
 import HeatmapMapFallback from '../components/HeatmapMapFallback';
+import { isSafetyAlertsEnabled, startSafetyAlerts, stopSafetyAlerts, subscribeToSafetyAlerts } from '../services/safetyAlerts';
+import { startBackgroundSafetyTracking, stopBackgroundSafetyTracking } from '../services/locationTask';
+import { getStoredUserId, updateLocation } from '../services/api';
+import * as Location from 'expo-location';
 
 let HeatmapMap: any = null;
 if (Platform.OS === 'ios' || Platform.OS === 'android') {
@@ -32,6 +36,87 @@ export default function HomeScreen() {
   const route = useRoute<HomeScreenRouteProp>();
   const navigation = useNavigation();
   const panToLocation = route.params?.panToLocation || null;
+  const [alertsEnabled, setAlertsEnabled] = useState(isSafetyAlertsEnabled());
+  const [currentAddress, setCurrentAddress] = useState<string>('Loading...');
+  const [lastRiskScore, setLastRiskScore] = useState<number | null>(null);
+  const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [riskBanner, setRiskBanner] = useState<{ visible: boolean; score: number; message: string } | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          setCurrentAddress('Location permission denied');
+          return;
+        }
+        const loc = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        setCoords({ lat: loc.coords.latitude, lng: loc.coords.longitude });
+        // Reverse geocode is best-effort; always fall back to coordinates.
+        let addr = `${loc.coords.latitude.toFixed(4)}, ${loc.coords.longitude.toFixed(4)}`;
+        try {
+          const places = await Location.reverseGeocodeAsync({
+            latitude: loc.coords.latitude,
+            longitude: loc.coords.longitude,
+          });
+          const p = places?.[0];
+          const pretty = p ? [p.name, p.street, p.city, p.region].filter(Boolean).join(', ') : "";
+          if (pretty) addr = pretty;
+        } catch {
+          // keep coords fallback
+        }
+        setCurrentAddress(addr);
+
+        // Risk score requires a signed-in session when MOBILE_AUTH_REQUIRED is on.
+        // Do not fail the whole location UI if this returns 401.
+        try {
+          const uid = (await getStoredUserId()) || 'user_anon';
+          const res = await updateLocation(
+            uid,
+            loc.coords.latitude,
+            loc.coords.longitude,
+            loc.coords.accuracy ?? undefined
+          );
+          const score = res?.riskAssessment?.riskScore;
+          if (typeof score === 'number') setLastRiskScore(score);
+        } catch (e: any) {
+          const msg = String(e?.message || '');
+          if (msg.includes('401')) {
+            setLastRiskScore(null);
+          }
+          console.warn('Home: risk/location API skipped:', msg);
+        }
+      } catch {
+        setCurrentAddress('Current location unavailable');
+      }
+    })();
+    const unsub = subscribeToSafetyAlerts((e) => {
+      if (e.type === 'risk:update') {
+        setLastRiskScore(e.riskScore);
+        if (typeof e.riskScore === 'number' && e.riskScore >= 3.5) {
+          setRiskBanner({
+            visible: true,
+            score: e.riskScore,
+            message: 'You are in a high-risk zone. Consider changing route or moving to a safer area.',
+          });
+        }
+      }
+      if (e.type === 'risk:alert') {
+        setRiskBanner({
+          visible: true,
+          score: e.alert.riskScore,
+          message: e.alert.message || 'High-risk zone detected.',
+        });
+      }
+    });
+    return () => {
+      // Stop on unmount to avoid unexpected tracking in dev sessions.
+      stopSafetyAlerts();
+      unsub();
+    };
+  }, []);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -46,7 +131,11 @@ export default function HomeScreen() {
             <Text style={styles.subtitle}>Your safety companion</Text>
           </View>
         </View>
-        <TouchableOpacity style={styles.infoButton} onPress={() => {}} accessibleLabel="Info">
+        <TouchableOpacity
+          style={styles.infoButton}
+          onPress={() => {}}
+          accessibilityLabel="Info"
+        >
           <InfoIcon size={22} />
         </TouchableOpacity>
       </View>
@@ -87,17 +176,71 @@ export default function HomeScreen() {
             <Text style={styles.legendLabel}>Critical</Text>
           </View>
         </View>
+
+        {riskBanner?.visible && (
+          <View style={styles.riskBanner}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.riskBannerTitle}>High Risk</Text>
+              <Text style={styles.riskBannerBody} numberOfLines={2}>
+                {riskBanner.message} (score {riskBanner.score.toFixed(2)})
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => setRiskBanner(null)}
+              style={styles.riskBannerClose}
+              accessibilityLabel="Dismiss risk alert"
+            >
+              <Text style={styles.riskBannerCloseText}>×</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </View>
 
       {/* Bottom card: location + Plan Safe Route */}
       <View style={styles.bottomCard}>
         <View style={styles.locationRow}>
           <LocationIcon size={20} />
-          <View>
+          <View style={styles.locationTextWrap}>
             <Text style={styles.locationLabel}>Current Location</Text>
-            <Text style={styles.locationAddress}>Connaught Place, New Delhi</Text>
+            <Text style={styles.locationAddress} numberOfLines={2} ellipsizeMode="tail">
+              {currentAddress}
+            </Text>
+            {typeof lastRiskScore === 'number' && (
+              <Text style={[styles.locationAddress, { marginTop: 4, color: colors.textTertiary }]}>
+                Risk score: {lastRiskScore.toFixed(2)}
+              </Text>
+            )}
           </View>
         </View>
+        <TouchableOpacity
+          style={[styles.alertsButton, alertsEnabled && styles.alertsButtonOn]}
+          onPress={async () => {
+            try {
+              if (alertsEnabled) {
+                stopSafetyAlerts();
+                void stopBackgroundSafetyTracking();
+                setAlertsEnabled(false);
+                return;
+              }
+              await startSafetyAlerts({ intervalMs: 15_000 });
+              const bg = await startBackgroundSafetyTracking().catch(() => false);
+              setAlertsEnabled(true);
+              Alert.alert(
+                'Safety Alerts Enabled',
+                bg
+                  ? 'Foreground + background location updates are on. You will be alerted when you enter a high-risk zone.'
+                  : 'Foreground alerts are on. Allow “Always” location in Settings and use a dev build for background updates.'
+              );
+            } catch (e: any) {
+              Alert.alert('Safety Alerts', e?.message || 'Failed to enable safety alerts.');
+            }
+          }}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.alertsButtonText}>
+            {alertsEnabled ? 'Safety Alerts: ON' : 'Safety Alerts: OFF'}
+          </Text>
+        </TouchableOpacity>
         <TouchableOpacity
           style={styles.planRouteButton}
           onPress={() => navigation.navigate('Routes' as never)}
@@ -174,6 +317,44 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     borderRadius: 12,
   },
+  riskBanner: {
+    position: 'absolute',
+    left: spacing.md,
+    right: spacing.md,
+    bottom: spacing.md,
+    backgroundColor: colors.danger,
+    borderRadius: 14,
+    padding: spacing.md,
+    flexDirection: 'row',
+    gap: spacing.sm,
+    alignItems: 'center',
+  },
+  riskBannerTitle: {
+    color: colors.white,
+    fontWeight: '900',
+    fontSize: 14,
+  },
+  riskBannerBody: {
+    color: colors.white,
+    opacity: 0.95,
+    fontSize: 12,
+    marginTop: 4,
+    lineHeight: 16,
+  },
+  riskBannerClose: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  riskBannerCloseText: {
+    color: colors.white,
+    fontSize: 22,
+    lineHeight: 22,
+    fontWeight: '900',
+  },
   legendTitle: {
     fontSize: 12,
     fontWeight: '600',
@@ -206,9 +387,14 @@ const styles = StyleSheet.create({
   },
   locationRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: spacing.sm,
     marginBottom: spacing.md,
+  },
+  locationTextWrap: {
+    flex: 1,
+    flexShrink: 1,
+    minWidth: 0,
   },
   locationIcon: {
     fontSize: 20,
@@ -222,6 +408,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.textSecondary,
     marginTop: 2,
+    flexShrink: 1,
   },
   planRouteButton: {
     flexDirection: 'row',
@@ -239,6 +426,24 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: colors.white,
+  },
+  alertsButton: {
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 12,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+    marginBottom: spacing.sm,
+  },
+  alertsButtonOn: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '14',
+  },
+  alertsButtonText: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '600',
   },
   androidNote: {
     marginHorizontal: spacing.md,

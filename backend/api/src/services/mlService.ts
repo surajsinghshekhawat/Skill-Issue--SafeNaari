@@ -8,7 +8,7 @@
 import axios, { AxiosInstance } from "axios";
 
 // ML Service configuration
-const ML_SERVICE_URL = process.env.ML_SERVICE_URL || "http://192.168.1.12:8000";
+const ML_SERVICE_URL = process.env.ML_SERVICE_URL || "http://192.168.1.7:8000";
 const ML_SERVICE_TIMEOUT = parseInt(process.env.ML_SERVICE_TIMEOUT || "120000"); // 120 seconds (2 minutes) default - heatmaps with many cells can take time
 
 // Create axios instance for ML service
@@ -123,10 +123,18 @@ export async function getHeatmap(
 /**
  * Get risk score for a location from ML service
  */
-export async function getRiskScore(lat: number, lng: number) {
+export async function getRiskScore(
+  lat: number,
+  lng: number,
+  opts?: { localHour?: number }
+) {
   try {
     const response = await mlClient.get("/ml/risk-score", {
-      params: { lat, lng },
+      params: {
+        lat,
+        lng,
+        local_hour: opts?.localHour !== undefined ? opts.localHour : undefined,
+      },
     });
     return response.data;
   } catch (error: any) {

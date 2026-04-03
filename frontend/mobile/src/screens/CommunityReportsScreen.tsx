@@ -22,8 +22,8 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { colors } from "../theme/colors";
 import { spacing } from "../theme/spacing";
-import { ShieldIcon, LocationIcon, CloseIcon } from "../components/AppIcons";
-import { fetchCommunityReports } from "../services/api";
+import { ShieldIcon, LocationIcon, CloseIcon, AppIcon } from "../components/AppIcons";
+import { fetchCommunityReports, voteOnReport } from "../services/api";
 import ReportDetailsScreen, { type ReportDetailsReport } from "./ReportDetailsScreen";
 import {
   subscribeToIncidents,
@@ -43,6 +43,9 @@ interface CommunityReport {
   };
   timestamp: string;
   verified: boolean;
+  media_url?: string | null;
+  votes?: { up: number; down: number };
+  comment_count?: number;
 }
 
 interface Filters {
@@ -196,47 +199,102 @@ export default function CommunityReportsScreen() {
     filters.severity !== null ||
     filters.dateRange !== "all";
 
+  const applyVoteToState = (reportId: string, up: number, down: number) => {
+    setReports((prev) =>
+      prev.map((r) => (r.id === reportId ? { ...r, votes: { up, down } } : r))
+    );
+    setSelectedReport((cur) =>
+      cur && cur.id === reportId ? { ...cur, votes: { up, down } } : cur
+    );
+  };
+
+  const handleListVote = async (item: CommunityReport, value: 1 | -1) => {
+    try {
+      const r = await voteOnReport(item.id, value);
+      if (r?.success && r?.votes) {
+        applyVoteToState(item.id, Number(r.votes.up || 0), Number(r.votes.down || 0));
+      }
+    } catch {
+      // network / auth
+    }
+  };
+
   const renderReport = ({ item }: { item: CommunityReport }) => (
-    <TouchableOpacity
-      style={styles.reportItem}
-      onPress={() => setSelectedReport(item)}
-      activeOpacity={0.7}
-    >
-      <View style={styles.reportHeader}>
-        <View style={styles.reportTitleRow}>
-          <Text style={styles.reportCategory}>{item.category}</Text>
-          <View
-            style={[
-              styles.severityBadge,
-              { backgroundColor: getSeverityColor(item.severity) },
-            ]}
-          >
-            <Text style={styles.severityText}>
-              {getSeverityLabel(item.severity)}
+    <View style={styles.reportItem}>
+      <TouchableOpacity
+        activeOpacity={0.7}
+        onPress={() => setSelectedReport(item)}
+        accessibilityRole="button"
+        accessibilityLabel={`Open report ${item.category}`}
+      >
+        <View style={styles.reportHeader}>
+          <View style={styles.reportTitleRow}>
+            <Text style={styles.reportCategory}>{item.category}</Text>
+            <View
+              style={[
+                styles.severityBadge,
+                { backgroundColor: getSeverityColor(item.severity) },
+              ]}
+            >
+              <Text style={styles.severityText}>
+                {getSeverityLabel(item.severity)}
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.reportType}>{item.type.replace("_", " ")}</Text>
+        </View>
+
+        <Text style={styles.reportDescription} numberOfLines={6}>
+          {item.description}
+        </Text>
+
+        <View style={styles.reportFooter}>
+          <Text style={styles.reportDate}>{formatDate(item.timestamp)}</Text>
+          <View style={styles.reportLocationRow}>
+            <LocationIcon size={14} />
+            <Text style={styles.reportLocation}>
+              {item.location.latitude.toFixed(4)}, {item.location.longitude.toFixed(4)}
             </Text>
           </View>
         </View>
-        <Text style={styles.reportType}>{item.type.replace("_", " ")}</Text>
+
+        {item.verified && (
+          <View style={styles.verifiedBadge}>
+            <Text style={styles.verifiedText}>✓ Verified</Text>
+          </View>
+        )}
+      </TouchableOpacity>
+
+      <View style={styles.reportActions}>
+        <TouchableOpacity
+          style={styles.reportActionBtn}
+          onPress={() => handleListVote(item, 1)}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          accessibilityLabel="Upvote"
+        >
+          <AppIcon name="chevron-up-outline" size={22} color={colors.primary} />
+          <Text style={styles.reportActionCount}>{item.votes?.up ?? 0}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.reportActionBtn}
+          onPress={() => handleListVote(item, -1)}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          accessibilityLabel="Downvote"
+        >
+          <AppIcon name="chevron-down-outline" size={22} color={colors.textSecondary} />
+          <Text style={styles.reportActionCount}>{item.votes?.down ?? 0}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.reportActionBtn}
+          onPress={() => setSelectedReport(item)}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          accessibilityLabel="Comments"
+        >
+          <AppIcon name="chatbubble-ellipses-outline" size={20} color={colors.textSecondary} />
+          <Text style={styles.reportActionCount}>{item.comment_count ?? 0}</Text>
+        </TouchableOpacity>
       </View>
-
-      <Text style={styles.reportDescription}>{item.description}</Text>
-
-      <View style={styles.reportFooter}>
-        <Text style={styles.reportDate}>{formatDate(item.timestamp)}</Text>
-        <View style={styles.reportLocationRow}>
-          <LocationIcon size={14} />
-          <Text style={styles.reportLocation}>
-            {item.location.latitude.toFixed(4)}, {item.location.longitude.toFixed(4)}
-          </Text>
-        </View>
-      </View>
-
-      {item.verified && (
-        <View style={styles.verifiedBadge}>
-          <Text style={styles.verifiedText}>✓ Verified</Text>
-        </View>
-      )}
-    </TouchableOpacity>
+    </View>
   );
 
   return (
@@ -458,6 +516,10 @@ export default function CommunityReportsScreen() {
         report={selectedReport as ReportDetailsReport | null}
         visible={!!selectedReport}
         onClose={() => setSelectedReport(null)}
+        onVotesUpdated={(reportId, v) => applyVoteToState(reportId, v.up, v.down)}
+        onCommentsChanged={() => {
+          loadReports();
+        }}
         onViewOnMap={(lat, lng) => {
           setSelectedReport(null);
           Linking.openURL(`https://www.google.com/maps?q=${lat},${lng}`);
@@ -503,6 +565,28 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
     borderWidth: 1,
     borderColor: colors.border,
+  },
+  reportActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: spacing.md,
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  reportActionBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    minWidth: 44,
+    justifyContent: "center",
+  },
+  reportActionCount: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: colors.text,
   },
   reportHeader: {
     marginBottom: spacing.sm,

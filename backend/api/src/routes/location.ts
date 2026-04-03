@@ -16,6 +16,9 @@ import {
   analyzeRoutes as mlAnalyzeRoutes,
 } from "../services/mlService";
 import { getRouteOptions, searchPlaces, getPlaceCoordinates } from "../services/googleMapsService";
+import { mobileAuthRequired, requireUserAuth } from "../middleware/userAuth";
+import { dbReady } from "../db/pool";
+import { insertLocationHistory } from "../db/locationHistoryDb";
 
 const router = express.Router();
 
@@ -23,19 +26,26 @@ const router = express.Router();
  * POST /api/location/update
  * Update user location
  */
-router.post("/update", async (req: Request, res: Response) => {
+router.post(
+  "/update",
+  (req, res, next) => (mobileAuthRequired() ? requireUserAuth(req, res, next) : next()),
+  async (req: Request, res: Response) => {
   try {
-    const { userId, latitude, longitude, timestamp, accuracy } = req.body;
+    const { userId, latitude, longitude, timestamp, accuracy, local_hour, timezone_offset_minutes } =
+      req.body;
+
+    const authedUserId = (req as any).user?.sub;
+    const effectiveUserId = mobileAuthRequired() ? authedUserId : userId;
 
     // Validate required fields
-    if (!userId || !latitude || !longitude) {
+    if (!effectiveUserId || !latitude || !longitude) {
       return res.status(400).json({
-        error: "Missing required fields: userId, latitude, longitude",
+        error: "Missing required fields: userId (or auth), latitude, longitude",
       });
     }
 
     console.log("📍 Location update received:", {
-      userId,
+      userId: effectiveUserId,
       latitude,
       longitude,
       accuracy: accuracy || "unknown",
@@ -58,14 +68,44 @@ router.post("/update", async (req: Request, res: Response) => {
     // Check risk score for this location
     let riskData = null;
     try {
-      riskData = await getRiskScore(latitude, longitude);
+      const now = new Date();
+      const localHourNum =
+        local_hour !== undefined && local_hour !== null
+          ? parseInt(String(local_hour), 10)
+          : now.getHours();
+
+      // Validate local hour if provided
+      if (Number.isFinite(localHourNum) && (localHourNum < 0 || localHourNum > 23)) {
+        return res.status(400).json({
+          error: "Invalid local_hour. Must be between 0-23.",
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      riskData = await getRiskScore(latitude, longitude, { localHour: localHourNum });
     } catch (error) {
       console.error("Risk score check failed:", error);
       // Continue even if risk check fails
     }
 
-    // TODO: Store location in database
-    // TODO: Trigger alerts if in high-risk area (risk_score >= 4.0)
+    if (await dbReady()) {
+      void insertLocationHistory({
+        userId: effectiveUserId,
+        latitude,
+        longitude,
+        accuracy: accuracy != null ? Number(accuracy) : null,
+      });
+    }
+
+    // High-risk entry alerting (server-side hysteresis + cooldown)
+    // Note: This is in-memory state (dev-friendly). For production, persist per-user state.
+    const io = req.app.locals?.io;
+    const riskAlert = maybeBuildRiskAlertAndEmit(io, {
+      userId: effectiveUserId,
+      latitude,
+      longitude,
+      riskData,
+    });
 
     // Check if location is in high-risk area
     const isHighRisk = riskData && riskData.risk_score >= 4.0 ? true : false;
@@ -81,6 +121,7 @@ router.post("/update", async (req: Request, res: Response) => {
             isHighRisk,
           }
         : null,
+      riskAlert,
     });
   } catch (error) {
     console.error("Location update error:", error);
@@ -90,6 +131,96 @@ router.post("/update", async (req: Request, res: Response) => {
     });
   }
 });
+
+type RiskDataShape = null | {
+  success?: boolean;
+  risk_score?: number;
+  risk_level?: string;
+};
+
+const USER_ALERT_STATE = new Map<
+  string,
+  { inHighRisk: boolean; lastAlertAtMs: number }
+>();
+
+function maybeBuildRiskAlertAndEmit(
+  io: any,
+  data: {
+    userId: string;
+    latitude: number;
+    longitude: number;
+    riskData: RiskDataShape;
+  }
+):
+  | {
+      triggered: boolean;
+      riskScore: number;
+      riskLevel: string;
+      message: string;
+      location: { lat: number; lng: number };
+      cooldown_seconds: number;
+    }
+  | null {
+  if (!data.userId) return null;
+  const riskScore = Number(data.riskData?.risk_score);
+  const riskLevel = String(data.riskData?.risk_level || "");
+  if (!Number.isFinite(riskScore)) return null;
+
+  // User request: alert at >= 3.5
+  const ENTER_THRESHOLD = 3.5;
+  const EXIT_THRESHOLD = 3.2; // hysteresis
+  const COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+
+  const nowMs = Date.now();
+  const prev = USER_ALERT_STATE.get(data.userId) || {
+    inHighRisk: false,
+    lastAlertAtMs: 0,
+  };
+
+  const nextInHighRisk =
+    prev.inHighRisk ? riskScore >= EXIT_THRESHOLD : riskScore >= ENTER_THRESHOLD;
+
+  const entering = !prev.inHighRisk && nextInHighRisk;
+  const cooldownOk = nowMs - prev.lastAlertAtMs >= COOLDOWN_MS;
+
+  let alertPayload: any = null;
+  if (entering && cooldownOk) {
+    const message =
+      "High-risk zone detected. Consider changing route or moving to a crowded, well-lit area.";
+
+    alertPayload = {
+      triggered: true,
+      riskScore,
+      riskLevel: riskLevel || "unknown",
+      message,
+      location: { lat: data.latitude, lng: data.longitude },
+      cooldown_seconds: Math.round(COOLDOWN_MS / 1000),
+    };
+
+    // Emit WS alert if possible
+    try {
+      if (io) {
+        const { emitRiskAlert } = require("../websocket/socketHandler");
+        emitRiskAlert(io, {
+          userId: data.userId,
+          location: { lat: data.latitude, lng: data.longitude },
+          riskScore,
+          riskLevel: riskLevel || "unknown",
+          message,
+        });
+      }
+    } catch (e) {
+      // WS is optional; HTTP response still contains riskAlert.
+    }
+  }
+
+  USER_ALERT_STATE.set(data.userId, {
+    inHighRisk: nextInHighRisk,
+    lastAlertAtMs: entering && cooldownOk ? nowMs : prev.lastAlertAtMs,
+  });
+
+  return alertPayload;
+}
 
 /**
  * GET /api/location/heatmap

@@ -50,8 +50,16 @@ def get_clusters(force_recalculate: bool = False) -> List[Dict]:
     if _clusters_cache is not None and not force_recalculate:
         return _clusters_cache
     
-    # Get all incidents
-    incidents = get_incidents()
+    # Get all incidents (exclude explicitly rejected ones)
+    incidents_all = get_incidents()
+    incidents: List[Dict] = []
+    for inc in incidents_all:
+        try:
+            if (not bool(inc.get("verified", False))) and inc.get("moderation_reason", None) not in (None, "", False):
+                continue
+        except Exception:
+            pass
+        incidents.append(inc)
     
     if len(incidents) < settings.dbscan_min_samples:
         _clusters_cache = []

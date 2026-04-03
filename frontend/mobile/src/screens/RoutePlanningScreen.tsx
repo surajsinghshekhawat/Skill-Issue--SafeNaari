@@ -27,6 +27,14 @@ import { colors } from '../theme/colors';
 import { spacing } from '../theme/spacing';
 import { ShieldIcon, LocationIcon, MapIcon, OpenIcon, AlertIcon, CloseIcon } from '../components/AppIcons';
 
+function getNotifications(): any | null {
+  try {
+    return require('expo-notifications');
+  } catch {
+    return null;
+  }
+}
+
 export default function RoutePlanningScreen() {
   const [startLocation, setStartLocation] = useState<{ lat: number; lng: number; name?: string } | null>(null);
   const [endLocation, setEndLocation] = useState<{ lat: number; lng: number; name?: string } | null>(null);
@@ -243,31 +251,67 @@ export default function RoutePlanningScreen() {
       Alert.alert('No Route', 'Please select a route first');
       return;
     }
-    const maxWaypoints = 25;
-    const pts = route.waypoints;
-    let waypointsStr = '';
-    if (pts.length > 2) {
-      const step = Math.max(1, Math.floor((pts.length - 2) / (maxWaypoints - 2)));
-      const sampled: typeof pts = [];
-      for (let i = 1; i < pts.length - 1; i += step) {
-        sampled.push(pts[i]);
-        if (sampled.length >= maxWaypoints - 2) break;
+    const isRisky = (route.riskScore ?? 0) >= 3.5 || (route.highRiskSegments?.length || 0) > 0;
+
+    const proceed = async () => {
+      if (isRisky) {
+        try {
+          const Notifications = getNotifications();
+          if (Notifications?.scheduleNotificationAsync) {
+            await Notifications.scheduleNotificationAsync({
+              content: {
+                title: 'Route warning',
+                body: 'This route includes high-risk segments. Stay alert and consider alternatives.',
+                sound: true,
+                priority: Notifications.AndroidNotificationPriority?.HIGH,
+              },
+              trigger: null,
+            });
+          }
+        } catch {
+          // ignore
+        }
       }
-      waypointsStr = sampled.map((p) => `${p.lat},${p.lng}`).join('|');
+
+      const maxWaypoints = 25;
+      const pts = route.waypoints;
+      let waypointsStr = '';
+      if (pts.length > 2) {
+        const step = Math.max(1, Math.floor((pts.length - 2) / (maxWaypoints - 2)));
+        const sampled: typeof pts = [];
+        for (let i = 1; i < pts.length - 1; i += step) {
+          sampled.push(pts[i]);
+          if (sampled.length >= maxWaypoints - 2) break;
+        }
+        waypointsStr = sampled.map((p) => `${p.lat},${p.lng}`).join('|');
+      }
+      const origin = `${startLocation.lat},${startLocation.lng}`;
+      const dest = `${endLocation.lat},${endLocation.lng}`;
+      const base = 'https://www.google.com/maps/dir/?api=1';
+      const params = new URLSearchParams({
+        origin,
+        destination: dest,
+        travelmode: 'driving',
+      });
+      if (waypointsStr) params.set('waypoints', waypointsStr);
+      const url = `${base}&${params.toString()}`;
+      Linking.openURL(url).catch(() => {
+        Alert.alert('Error', 'Could not open Google Maps');
+      });
+    };
+
+    if (isRisky) {
+      Alert.alert(
+        'Route warning',
+        'This route includes high-risk segments. Do you still want to open it in Google Maps?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Open anyway', style: 'destructive', onPress: () => void proceed() },
+        ]
+      );
+      return;
     }
-    const origin = `${startLocation.lat},${startLocation.lng}`;
-    const dest = `${endLocation.lat},${endLocation.lng}`;
-    const base = 'https://www.google.com/maps/dir/?api=1';
-    const params = new URLSearchParams({
-      origin,
-      destination: dest,
-      travelmode: 'driving',
-    });
-    if (waypointsStr) params.set('waypoints', waypointsStr);
-    const url = `${base}&${params.toString()}`;
-    Linking.openURL(url).catch(() => {
-      Alert.alert('Error', 'Could not open Google Maps');
-    });
+    void proceed();
   };
 
   // Helper function to validate coordinates
@@ -507,7 +551,7 @@ export default function RoutePlanningScreen() {
             endLocation.lng <= 180 && (
               <Marker
                 coordinate={{ latitude: endLocation.lat, longitude: endLocation.lng }}
-                pinColor={colors.error}
+                pinColor={colors.danger}
                 title="End"
                 description={endLocation.name || 'End Location'}
                 draggable
@@ -759,23 +803,6 @@ const styles = StyleSheet.create({
   },
   useCurrentTextTop: {
     fontSize: 16,
-  },
-  header: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    backgroundColor: colors.backgroundSecondary,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: colors.text,
-    marginBottom: spacing.xs,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: colors.textSecondary,
   },
   mapContainer: {
     flex: 1,

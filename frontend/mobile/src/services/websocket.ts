@@ -32,6 +32,13 @@ let currentLocationSub:
 let heatmapUpdateCallback: ((heatmapData: any) => void) | null = null;
 let incidentCallback: ((incident: any) => void) | null = null;
 
+const _pendingWsLog = new Set<string>();
+function logWsPendingOnce(channel: string, detail: string) {
+  if (_pendingWsLog.has(channel)) return;
+  _pendingWsLog.add(channel);
+  console.log(`🔌 WebSocket still handshaking — ${detail} (will subscribe when ready)`);
+}
+
 // Deduplicate incident events (can arrive via multiple rooms/channels)
 const _recentIncidentIds = new Map<string, number>(); // incidentId -> lastSeenMs
 const _INCIDENT_DEDUP_WINDOW_MS = 10_000;
@@ -52,7 +59,7 @@ function _ensureSocketHandlersBound() {
   s._wsaHandlersBound = true;
 
   // Single heatmap update handler that forwards to latest callback
-  socket.on("heatmap:update", (data) => {
+  socket.on("heatmap:update", (data: any) => {
     if (heatmapUpdateCallback) {
       console.log("📡 Received heatmap update via WebSocket");
       heatmapUpdateCallback(data);
@@ -60,7 +67,7 @@ function _ensureSocketHandlersBound() {
   });
 
   // Single incident handler that forwards to latest callback
-  socket.on("incident:new", (data) => {
+  socket.on("incident:new", (data: any) => {
     const nowMs = Date.now();
     const id = data?.incidentId ? String(data.incidentId) : null;
     if (id) {
@@ -84,7 +91,7 @@ function _ensureSocketHandlersBound() {
   });
 
   // Log subscription acknowledgements without duplicating
-  socket.on("subscribed", (data) => {
+  socket.on("subscribed", (data: any) => {
     const room = data?.room;
     if (room && s._wsaLastSubscribedRoom !== room) {
       console.log("📍 Subscribed to location room:", room);
@@ -126,9 +133,16 @@ export function initWebSocket(): ReturnType<typeof io> {
 
     socket.on("connect", () => {
       isConnected = true;
-      // Only log once to avoid spam
+      // Socket id is assigned synchronously on connect; log next tick if ever missing in a client build.
       if (!socket?._hasLoggedConnect) {
-        console.log("✅ WebSocket connected:", socket?.id);
+        const sid = (socket as any)?.id;
+        if (sid) {
+          console.log("✅ WebSocket connected:", sid);
+        } else {
+          Promise.resolve().then(() => {
+            console.log("✅ WebSocket connected:", (socket as any)?.id || "(id pending)");
+          });
+        }
         socket._hasLoggedConnect = true;
       }
 
@@ -141,6 +155,13 @@ export function initWebSocket(): ReturnType<typeof io> {
             lng: currentLocationSub.lng,
             radius: currentLocationSub.radius,
           });
+        } catch {
+          // ignore
+        }
+      }
+      if (incidentCallback) {
+        try {
+          socket.emit("subscribe:incidents");
         } catch {
           // ignore
         }
@@ -158,7 +179,7 @@ export function initWebSocket(): ReturnType<typeof io> {
       }
     });
 
-    socket.on("connect_error", (error) => {
+    socket.on("connect_error", (error: any) => {
       isConnected = false;
       // Log reason once to help debug (e.g. connection refused, timeout)
       if (!socket?._hasLoggedConnectError) {
@@ -170,7 +191,7 @@ export function initWebSocket(): ReturnType<typeof io> {
       }
     });
 
-    socket.on("error", (error) => {
+    socket.on("error", (error: any) => {
       isConnected = false;
       // WebSocket is optional - app continues without it
     });
@@ -204,48 +225,38 @@ export function subscribeToLocation(
     socket = initWebSocket();
   }
 
-  // Always update the callback reference (even if we don't resubscribe)
   heatmapUpdateCallback = onUpdate;
+  _ensureSocketHandlersBound();
 
-  // Only subscribe if socket is connected
+  const key = _locationKey(lat, lng, radius);
+  if (currentLocationSub?.key === key && socket?.connected) {
+    return;
+  }
+
+  if (currentLocationSub && currentLocationSub.key !== key && socket?.connected) {
+    try {
+      socket.emit("unsubscribe:location", {
+        lat: currentLocationSub.lat,
+        lng: currentLocationSub.lng,
+        radius: currentLocationSub.radius,
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  currentLocationSub = { lat, lng, radius, key };
+
   if (socket && socket.connected) {
     try {
-      _ensureSocketHandlersBound();
-
-      const key = _locationKey(lat, lng, radius);
-      if (currentLocationSub?.key === key) {
-        // Already subscribed to this room; don't spam subscribe events.
-        return;
-      }
-
-      // If we were previously subscribed to a different room, explicitly unsubscribe first
-      // to avoid receiving updates for multiple rooms when the user pans/zooms.
-      if (currentLocationSub && currentLocationSub.key !== key) {
-        try {
-          socket.emit("unsubscribe:location", {
-            lat: currentLocationSub.lat,
-            lng: currentLocationSub.lng,
-            radius: currentLocationSub.radius,
-          });
-        } catch {
-          // ignore
-        }
-      }
-
-      // Join location room
       socket.emit("subscribe:location", { lat, lng, radius });
-      currentLocationSub = { lat, lng, radius, key };
-
     } catch (error) {
-      console.warn(
-        "⚠️ WebSocket subscription failed - using HTTP polling:",
-        error
-      );
-      // Continue without WebSocket - app will use HTTP requests
+      console.warn("⚠️ WebSocket subscribe:location failed:", error);
     }
   } else {
-    console.warn(
-      "⚠️ WebSocket not connected - using HTTP polling for heatmap updates"
+    logWsPendingOnce(
+      "heatmap",
+      "heatmap will use HTTP until connected; live updates apply after connect"
     );
   }
 }
@@ -259,24 +270,19 @@ export function subscribeToIncidents(onNewIncident: (incident: any) => void) {
     socket = initWebSocket();
   }
 
-  // Always update the callback reference (even if we don't resubscribe)
   incidentCallback = onNewIncident;
+  _ensureSocketHandlersBound();
 
-  // Only subscribe if socket is connected
   if (socket && socket.connected) {
     try {
-      _ensureSocketHandlersBound();
       socket.emit("subscribe:incidents");
     } catch (error) {
-      console.warn(
-        "⚠️ WebSocket subscription failed - using HTTP polling:",
-        error
-      );
-      // Continue without WebSocket - app will use HTTP requests
+      console.warn("⚠️ WebSocket subscribe:incidents failed:", error);
     }
   } else {
-    console.warn(
-      "⚠️ WebSocket not connected - using HTTP polling for incident updates"
+    logWsPendingOnce(
+      "incidents",
+      "incidents will use HTTP until connected; live updates apply after connect"
     );
   }
 }

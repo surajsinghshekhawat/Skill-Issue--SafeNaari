@@ -17,13 +17,16 @@
       "bundleIdentifier": "com.womensafety.mobile",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "This app needs location access to show safety heatmaps and provide emergency services.",
-        "NSLocationAlwaysUsageDescription": "This app needs location access to track your location during emergencies."
+        "NSLocationAlwaysUsageDescription": "This app needs location access to track your location during emergencies.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Background location lets SafeNaari update risk checks when the app is not open.",
+        "UIBackgroundModes": ["location"]
       },
       "config": {
         "googleMapsApiKey": "AIzaSyB7r6HWm2mdwsjXNnbtjEUrIUN45CfcqfQ"
       }
     },
     "android": {
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
@@ -34,6 +37,9 @@
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
         "CAMERA",
         "READ_EXTERNAL_STORAGE",
         "WRITE_EXTERNAL_STORAGE"

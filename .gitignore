@@ -10,7 +10,7 @@ Thumbs.db
 .idea/
 *.code-workspace
 
-# Environment variables
+# Environment variables (use .env.example templates)
 .env
 .env.local
 .env.*.local
@@ -24,8 +24,6 @@ yarn-error.log*
 
 # Dependencies
 node_modules/
-package-lock.json
-yarn.lock
 
 # Build outputs
 dist/
@@ -48,12 +46,13 @@ ENV/
 *.sqlite
 *.sqlite3
 
-# Temporary files
+# Temporary / backup
 *.tmp
 *.temp
+*.backup
 .cache/
 
-# API Keys / Secrets
+# API Keys / Secrets (commit firebase.config.example.ts only)
 firebase.config.ts
 *.pem
 *.key
@@ -61,16 +60,26 @@ firebase.config.ts
 *.jks
 *.mobileprovision
 
-# Docs: ignore all markdown except README
-*.md
-!README.md
+# Root markdown notes (only README.md at repo root is tracked)
+/*.md
+!/README.md
 
-# Exclude research and scripts from repo
+# Other local-only docs
+CLAUDE*.md
+*_PROJECT_CONTEXT.md
+TECHNICAL_OVERVIEW.md
+FULL_PROJECT_REFERENCE.md
+RESEARCH_REPORT_CONTEXT.md
+
+# Research outputs / experiments (large or local-only)
 research/
-scripts/
-
-# Local papers / templates (do not commit)
+/scripts/
 ref_paper/
 *.pdf
 *.doc
 *.docx
+
+# Local dev data
+backend/api/data/
+backend/api/uploads/
+uploads/

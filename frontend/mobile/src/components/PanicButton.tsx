@@ -23,12 +23,15 @@ import { colors } from "../theme/colors";
 
 interface PanicButtonProps {
   onPanicTrigger: () => void;
+  /** Fired if user taps CANCEL on the pre-send confirmation (no SMS yet). */
+  onCancelBeforeSend?: () => void;
   emergencyContacts: string[];
   isActive: boolean;
 }
 
 export const PanicButton: React.FC<PanicButtonProps> = ({
   onPanicTrigger,
+  onCancelBeforeSend,
   emergencyContacts,
   isActive,
 }) => {
@@ -78,8 +81,7 @@ export const PanicButton: React.FC<PanicButtonProps> = ({
           text: "CANCEL",
           style: "cancel",
           onPress: () => {
-            // TODO: Implement panic cancellation logic
-            console.log("Panic alert cancelled");
+            onCancelBeforeSend?.();
           },
         },
         {

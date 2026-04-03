@@ -104,6 +104,17 @@ def generate_heatmap(
         # still sees incidents within its 1km local neighborhood).
         incidents_context = get_incidents_in_radius(center_lat, center_lng, radius_meters + 1000)
 
+        # Moderation-aware filtering:
+        # - rejected incidents (verified=False with moderation_reason set) are excluded entirely
+        def _is_rejected(inc: dict) -> bool:
+            try:
+                return (not bool(inc.get("verified", False))) and inc.get("moderation_reason", None) not in (None, "", False)
+            except Exception:
+                return False
+
+        incidents_in_view = [i for i in incidents_in_view if not _is_rejected(i)]
+        incidents_context = [i for i in incidents_context if not _is_rejected(i)]
+
         # Bin incidents into grid buckets (based on bounding box + grid size).
         # We keep two maps:
         # - view_bins: bins that have incidents within the requested view radius

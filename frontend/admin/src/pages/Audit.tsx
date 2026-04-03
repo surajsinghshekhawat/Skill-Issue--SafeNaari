@@ -28,6 +28,7 @@ export default function Audit() {
           <thead>
             <tr>
               <th>Time</th>
+              <th>Actor</th>
               <th>Entity ID</th>
               <th>Action</th>
               <th>Reason</th>
@@ -37,9 +38,16 @@ export default function Audit() {
             {list.map((entry: any, idx: number) => (
               <tr key={idx}>
                 <td>{entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '—'}</td>
+                <td><code>{entry.actorId ? `${String(entry.actorId).slice(0, 12)}…` : '—'}</code></td>
                 <td><code>{entry.entityId?.slice(0, 16)}…</code></td>
                 <td>
-                  <span className={entry.action === 'verified' ? styles.badgeOk : styles.badgeReject}>
+                  <span
+                    className={
+                      String(entry.action || '').includes('reject')
+                        ? styles.badgeReject
+                        : styles.badgeOk
+                    }
+                  >
                     {entry.action}
                   </span>
                 </td>

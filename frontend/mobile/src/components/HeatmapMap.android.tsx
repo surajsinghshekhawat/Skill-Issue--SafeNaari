@@ -465,6 +465,11 @@ const HeatmapMap: React.FC<HeatmapMapProps> = ({
         ref={mapRef}
         provider={PROVIDER_GOOGLE}
         style={styles.map}
+        onMapReady={() => {
+          // If tiles stay gray/blank, check Google Cloud: enable "Maps SDK for Android",
+          // billing, and API key restrictions (package + SHA-1) for this build.
+          console.log("HeatmapMap: MapView ready (if base map is blank, fix native Maps API key / SDK)");
+        }}
         initialRegion={{
           latitude: query.latitude,
           longitude: query.longitude,
@@ -496,13 +501,6 @@ const HeatmapMap: React.FC<HeatmapMapProps> = ({
 
           // Debounced + tiered zoom-based query update (prevents reload spam)
           applyRegionToQuery(region);
-        }}
-        onError={(error: any) => {
-          console.error("Map error:", error);
-          setMapError(true);
-          if (onError) {
-            onError();
-          }
         }}
       >
         {/* Show user location marker if we have it */}
@@ -560,7 +558,6 @@ const HeatmapMap: React.FC<HeatmapMapProps> = ({
                       fillColor={color}
                       strokeColor={color}
                       strokeWidth={0}
-                      opacity={opacity}
                     />
                   );
                 } catch (error) {
@@ -589,7 +586,7 @@ const HeatmapMap: React.FC<HeatmapMapProps> = ({
             Make sure ML service is running: cd backend/ml && uvicorn
             app.main:app
           </Text>
-          <TouchableOpacity style={styles.retryButton} onPress={loadHeatmap}>
+          <TouchableOpacity style={styles.retryButton} onPress={() => loadHeatmap()}>
             <Text style={styles.retryButtonText}>Retry</Text>
           </TouchableOpacity>
         </View>

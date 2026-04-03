@@ -40,6 +40,18 @@ export function setupWebSocket(io: SocketIOServer) {
   io.on("connection", (socket: Socket) => {
     console.log(`✅ Client connected: ${socket.id}`);
 
+    // Identify user for user-targeted alerts (joins user:<userId> room)
+    socket.on("identify:user", (data: { userId?: string }) => {
+      const userId = data?.userId ? String(data.userId) : "";
+      if (!userId || userId.length > 128) {
+        return;
+      }
+      const roomId = `user:${userId}`;
+      socket.join(roomId);
+      console.log(`👤 Client ${socket.id} identified as ${roomId}`);
+      socket.emit("identified", { room: roomId });
+    });
+
     // Join room for location-based updates
     socket.on("subscribe:location", (data: { lat: number; lng: number; radius: number }) => {
       const { lat, lng, radius } = data;
